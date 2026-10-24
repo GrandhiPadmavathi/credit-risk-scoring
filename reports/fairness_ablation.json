@@ -1,0 +1,32 @@
+[
+  {
+    "variant": "all features",
+    "auc": 0.7877371505664101,
+    "threshold": 0.15,
+    "approval_rate": 0.4663333333333333,
+    "profit": 9579200.0,
+    "sex_min_air": 0.9173567743359974,
+    "age_band_min_air": 0.830847171404447,
+    "marriage_min_air": 0.985101139807226,
+    "education_min_air": 0.6829358029071734,
+    "sex_max_eo_gap": 0.031219785744672657,
+    "age_band_max_eo_gap": 0.08948813336781591,
+    "marriage_max_eo_gap": 0.018575157036695544,
+    "education_max_eo_gap": 0.16949871239308723
+  },
+  {
+    "variant": "without credit limit",
+    "auc": 0.778880938470145,
+    "threshold": 0.12,
+    "approval_rate": 0.3495,
+    "profit": 8343200.0,
+    "sex_min_air": 0.9320274007705658,
+    "age_band_min_air": 0.8244328199449212,
+    "marriage_min_air": 0.9675033098271997,
+    "education_min_air": 0.7492586111901576,
+    "sex_max_eo_gap": 0.016992497196117118,
+    "age_band_max_eo_gap": 0.06491492058911441,
+    "marriage_max_eo_gap": 0.003528665067126624,
+    "education_max_eo_gap": 0.1027627263057655
+  }
+]
