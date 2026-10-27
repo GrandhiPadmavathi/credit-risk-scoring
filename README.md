@@ -9,6 +9,15 @@ reasons**.
 Data: [UCI "default of credit card clients"](https://archive.ics.uci.edu/dataset/350/default+of+credit+card+clients)
 (30,000 Taiwanese card holders, 2005, 22.1% default the following month; CC BY 4.0).
 
+## Demo
+
+![Credit Risk Scoring demo: approve and decline with reason codes, grounded letter, monitoring tabs and API](docs/demo.gif)
+
+Recorded against the local dashboard and API; LLM thinking time is sped up. A reliable payer is approved and a
+recently late payer is declined (62.9% probability of default, above the 15% profit-optimal cut-off), each with
+reason codes. A customer letter is then drafted from those reasons only, followed by the model performance,
+fairness and drift tabs and the FastAPI docs.
+
 ## Results (held-out test set, 6,000 customers)
 
 | Model | AUC (95% CI) | KS | Brier | Calibration error (ECE) |
