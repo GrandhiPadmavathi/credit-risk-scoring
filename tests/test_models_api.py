@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from api.main import create_app
 from creditrisk.features import FEATURES
 from creditrisk.metrics import classification_report
+from creditrisk.security import KeyStore
 
 RISKY = {
     "limit_bal": 30000,
@@ -47,8 +48,7 @@ def test_lightgbm_is_monotone_in_payment_delay(fitted, feats):
     assert np.all(np.diff(scores) >= -1e-9)
 
 
-def test_score_endpoint(scorer):
-    client = TestClient(create_app(scorer))
+def test_score_endpoint(client):
     risky = client.post("/score", json=RISKY).json()
     safe = client.post("/score", json=SAFE).json()
     assert risky["probability_of_default"] > safe["probability_of_default"]
@@ -58,20 +58,18 @@ def test_score_endpoint(scorer):
     assert all(r["impact"] > 0 for r in risky["reasons"]["adverse"])
 
 
-def test_score_with_letter_falls_back_without_llm(scorer, monkeypatch):
+def test_score_with_letter_falls_back_without_llm(client, monkeypatch):
     monkeypatch.setattr("creditrisk.letter.SETTINGS", type("S", (), {"llm_enabled": False})())
-    body = TestClient(create_app(scorer)).post("/score?letter=true", json=RISKY).json()
+    body = client.post("/score?letter=true", json=RISKY).json()
     assert body["letter"]["source"] == "template" and "unable to approve" in body["letter"]["text"]
 
 
-def test_validation_rejects_bad_input(scorer):
-    client = TestClient(create_app(scorer))
+def test_validation_rejects_bad_input(client):
     assert client.post("/score", json={**RISKY, "pay_1": 12}).status_code == 422
     assert client.post("/score", json={**RISKY, "limit_bal": 0}).status_code == 422
 
 
-def test_batch_and_drift(scorer, raw):
-    client = TestClient(create_app(scorer))
+def test_batch_and_drift(client, raw):
     cols = list(RISKY)
     sample = raw[cols].head(300)
     batch = client.post("/score/batch", json={"applicants": sample.to_dict("records")}).json()
@@ -86,6 +84,6 @@ def test_batch_and_drift(scorer, raw):
     assert drifted["score_status"] == "significant" and drifted["features_flagged"]
 
 
-def test_health(scorer):
-    body = TestClient(create_app(scorer)).get("/health").json()
+def test_health_needs_no_key(scorer):
+    body = TestClient(create_app(scorer, KeyStore())).get("/health").json()
     assert body["status"] == "ok" and body["model"] == "lightgbm"

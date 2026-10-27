@@ -1,9 +1,17 @@
-"""Scoring service: probability of default, decision, reason codes, decision letter and drift checks."""
+"""Scoring service: probability of default, decision, reason codes, decision letter and drift checks.
+
+Every endpoint except /health needs an API key with the right scope (see creditrisk/security.py). Each decision is
+written to the `creditrisk.audit` log with the client name and a request id, without the applicant's figures.
+"""
 
 import json
+import logging
+import uuid
+from typing import Annotated
 
 import pandas as pd
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request, Security
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 
 from creditrisk import drift
@@ -11,6 +19,17 @@ from creditrisk.config import SETTINGS
 from creditrisk.features import FEATURES
 from creditrisk.letter import compose_letter
 from creditrisk.scoring import Scorer, default_scorer
+from creditrisk.security import ApiKey, AuthError, KeyStore
+
+audit = logging.getLogger("creditrisk.audit")
+if not audit.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(asctime)s audit %(message)s"))
+    audit.addHandler(_handler)
+    audit.setLevel(logging.INFO)
+api_key_header = APIKeyHeader(
+    name="X-API-Key", auto_error=False, description="Key from `python -m creditrisk.security create`"
+)
 
 Status = Field(ge=-2, le=9, description="-2 no balance, -1 paid in full, 0 revolving, 1-9 months overdue")
 Amount = Field(description="NT$")
@@ -61,8 +80,20 @@ def frame(applicants: list[Applicant]) -> pd.DataFrame:
     return pd.DataFrame([a.model_dump() for a in applicants])
 
 
-def create_app(scorer: Scorer | None = None) -> FastAPI:
-    app = FastAPI(title="Credit Risk Scoring API", version="1.0")
+def log_event(request: Request, event: str, **fields) -> None:
+    audit.info(json.dumps({"event": event, "request_id": request.state.request_id, "path": request.url.path, **fields}))
+
+
+def create_app(scorer: Scorer | None = None, keys: KeyStore | None = None) -> FastAPI:
+    app = FastAPI(title="Credit Risk Scoring API", version="1.1")
+    keys = keys or KeyStore.from_settings()
+
+    @app.middleware("http")
+    async def request_id(request: Request, call_next):
+        request.state.request_id = uuid.uuid4().hex[:16]
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request.state.request_id
+        return response
 
     def get_scorer() -> Scorer:
         try:
@@ -70,12 +101,36 @@ def create_app(scorer: Scorer | None = None) -> FastAPI:
         except FileNotFoundError as exc:
             raise HTTPException(503, str(exc)) from exc
 
+    def require(scope: str | None):
+        def check(request: Request, presented: str | None = Security(api_key_header)) -> ApiKey:
+            try:
+                key = keys.authenticate(presented)
+            except AuthError as exc:
+                if exc.status_code in (401, 429):
+                    log_event(request, "auth_failed" if exc.status_code == 401 else "rate_limited", reason=exc.detail)
+                headers = exc.headers or ({"WWW-Authenticate": "ApiKey"} if exc.status_code == 401 else None)
+                raise HTTPException(exc.status_code, exc.detail, headers=headers) from exc
+            if scope and scope not in key.scopes:
+                log_event(request, "access_denied", client=key.name, key_id=key.id, scope=scope)
+                raise HTTPException(403, f"This API key does not have the '{scope}' scope")
+            request.state.key = key
+            return key
+
+        return check
+
+    AnyKey = Annotated[ApiKey, Depends(require(None))]
+    ScoreKey = Annotated[ApiKey, Depends(require("score"))]
+
     @app.get("/health")
     def health():
         s = get_scorer()
         return {"status": "ok", "model": s.model.name, "threshold": s.threshold, "trained_at": s.bundle["trained_at"]}
 
-    @app.get("/model")
+    @app.get("/auth/key")
+    def whoami(key: AnyKey):
+        return key.public()
+
+    @app.get("/model", dependencies=[Depends(require("model"))])
     def model_card_metrics():
         path = SETTINGS.paths.metrics
         if not path.exists():
@@ -86,20 +141,27 @@ def create_app(scorer: Scorer | None = None) -> FastAPI:
         }
 
     @app.post("/score")
-    def score(applicant: Applicant, letter: bool = False):
+    def score(applicant: Applicant, request: Request, key: ScoreKey, letter: bool = False):
+        if letter and "letter" not in key.scopes:
+            log_event(request, "access_denied", client=key.name, key_id=key.id, scope="letter")
+            raise HTTPException(403, "This API key does not have the 'letter' scope")
         result = get_scorer().score(frame([applicant]))[0]
         result.pop("id")
         if letter:
             result["letter"] = compose_letter(result)
+        log_event(request, "decision", client=key.name, key_id=key.id, decision=result["decision"],
+                  probability_of_default=result["probability_of_default"], threshold=result["threshold"],
+                  letter=result["letter"]["source"] if letter else None)
         return result
 
     @app.post("/score/batch")
-    def score_batch(batch: Batch):
+    def score_batch(batch: Batch, request: Request, key: ScoreKey):
         results = get_scorer().score(frame(batch.applicants), n_reasons=2)
         approved = sum(r["decision"] == "approve" for r in results)
+        log_event(request, "batch_decision", client=key.name, key_id=key.id, count=len(results), approved=approved)
         return {"count": len(results), "approval_rate": approved / len(results), "results": results}
 
-    @app.post("/monitor/drift")
+    @app.post("/monitor/drift", dependencies=[Depends(require("monitor"))])
     def monitor_drift(batch: Batch):
         if len(batch.applicants) < 100:
             raise HTTPException(422, "Send at least 100 applicants for a meaningful PSI estimate")

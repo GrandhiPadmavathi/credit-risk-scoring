@@ -20,6 +20,10 @@ class Paths:
     def metrics(self) -> Path:
         return self.reports / "metrics.json"
 
+    @property
+    def api_keys(self) -> Path:
+        return Path(os.getenv("API_KEYS_FILE", ROOT / "secrets" / "api_keys.json"))
+
 
 @dataclass(frozen=True)
 class CostModel:

@@ -1,11 +1,16 @@
 import numpy as np
 import pandas as pd
 import pytest
+from fastapi.testclient import TestClient
 
+from api.main import create_app
 from creditrisk.config import CostModel
 from creditrisk.features import build_features
 from creditrisk.models import lightgbm, logistic_regression
 from creditrisk.scoring import Scorer
+from creditrisk.security import SCOPES, KeyStore, new_key
+
+KEY_SCOPES = {"full": list(SCOPES), "portal": ["score"], "monitoring": ["monitor", "model"]}
 
 
 def synthetic_applicants(n: int = 3000, seed: int = 0) -> pd.DataFrame:
@@ -65,3 +70,25 @@ def scorer(fitted, feats) -> Scorer:
         "reference_pd": model.predict_pd(reference),
         "trained_at": "test",
     })
+
+
+@pytest.fixture
+def issued() -> dict:
+    """name -> (presented key, stored record) for each entry in KEY_SCOPES."""
+    return {name: new_key(name, scopes) for name, scopes in KEY_SCOPES.items()}
+
+
+@pytest.fixture
+def keystore(issued) -> KeyStore:
+    return KeyStore([record for _, record in issued.values()])
+
+
+@pytest.fixture
+def headers(issued) -> dict:
+    return {name: {"X-API-Key": key} for name, (key, _) in issued.items()}
+
+
+@pytest.fixture
+def client(scorer, keystore, headers) -> TestClient:
+    """Client authenticated with a key that has every scope."""
+    return TestClient(create_app(scorer, keystore), headers=headers["full"])

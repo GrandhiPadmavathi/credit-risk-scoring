@@ -60,7 +60,8 @@ calibrated. That is why calibration is part of the pipeline rather than an after
 | **Fairness** | Sex, age, marital status and education are **not model inputs** (education was removed after it showed up as a decline reason). Approval rates, adverse impact ratio and equal opportunity are audited across all four. A proxy ablation measures what credit limit contributes to the remaining gap. |
 | **Monitoring** | Population Stability Index (PSI) on every feature and on the score, with a downturn stress scenario to show what the alarm looks like. |
 | **LLM layer** | Drafts the approval or decline letter from the reason codes only. Any number in the LLM output that is not in those facts triggers a deterministic template instead. |
-| **Engineering** | FastAPI service, Streamlit dashboard, MLflow tracking, Docker image, 24 tests on synthetic data (no download needed). |
+| **API security** | Scoped API keys stored only as hashes, with expiry, revocation that takes effect without a restart, per-key rate limits, and an audit log of every decision tagged with the client and a request id (see [Security](#security)). |
+| **Engineering** | FastAPI service, Streamlit dashboard, MLflow tracking, Docker image, 36 tests on synthetic data (no download needed). |
 
 ## Fairness findings
 
@@ -101,8 +102,9 @@ python -m venv .venv && .venv\Scripts\activate        # or: source .venv/bin/act
 pip install -r requirements-dev.txt
 python scripts/download_data.py                        # UCI dataset into data/raw/ (not committed)
 python -m creditrisk.train                             # features, models, threshold, audit, reports/, MLflow
-pytest -q                                              # 24 tests, synthetic data only
-uvicorn api.main:app --port 8000                       # http://localhost:8000/docs
+pytest -q                                              # 36 tests, synthetic data only
+python -m creditrisk.security create --name local --scopes score,letter,monitor,model   # prints an API key once
+uvicorn api.main:app --port 8000                       # http://localhost:8000/docs (Authorize -> X-API-Key)
 streamlit run dashboard/app.py                         # dashboard
 python scripts/smoke.py                                # end-to-end check against the trained model
 ```
@@ -113,7 +115,7 @@ Docker (downloads the data and trains during the build):
 
 ```bash
 docker build -t credit-risk .
-docker run -p 8000:8000 credit-risk
+docker run -p 8000:8000 -v "$PWD/secrets:/app/secrets:ro" credit-risk   # keys created on the host
 docker run -p 8501:8501 credit-risk streamlit run dashboard/app.py --server.address=0.0.0.0
 ```
 
@@ -126,7 +128,8 @@ Letters use any OpenAI-compatible endpoint: local Ollama by default (`LLM_MODEL=
 ## API
 
 ```bash
-curl -X POST "http://localhost:8000/score?letter=true" -H "Content-Type: application/json" -d '{
+curl -X POST "http://localhost:8000/score?letter=true" -H "X-API-Key: $CREDIT_API_KEY" \
+  -H "Content-Type: application/json" -d '{
   "limit_bal": 50000,
   "pay_1": 2, "pay_2": 2, "pay_3": 0, "pay_4": 0, "pay_5": 0, "pay_6": 0,
   "bill_amt1": 48500, "bill_amt2": 47200, "bill_amt3": 45100, "bill_amt4": 30200, "bill_amt5": 29000, "bill_amt6": 28100,
@@ -150,15 +153,45 @@ Response (trimmed; `impact` is the contribution to the log-odds):
 }
 ```
 
-| Endpoint | Purpose |
-|---|---|
-| `POST /score` | One applicant: PD, risk band, decision, expected profit, reason codes, optional letter |
-| `POST /score/batch` | Up to 5,000 applicants |
-| `POST /monitor/drift` | PSI per feature and on the score for a batch (at least 100 applicants) |
-| `GET /model` | Champion, threshold, cost assumptions and test metrics |
-| `GET /health` | Liveness and model version |
+| Endpoint | Scope | Purpose |
+|---|---|---|
+| `POST /score` | `score` (+ `letter` for `?letter=true`) | One applicant: PD, risk band, decision, expected profit, reason codes, optional letter |
+| `POST /score/batch` | `score` | Up to 5,000 applicants |
+| `POST /monitor/drift` | `monitor` | PSI per feature and on the score for a batch (at least 100 applicants) |
+| `GET /model` | `model` | Champion, threshold, cost assumptions and test metrics |
+| `GET /auth/key` | any valid key | Name, scopes, expiry and rate limit of the calling key |
+| `GET /health` | none | Liveness and model version |
 
 The API does not ask for sex, age, marital status or education.
+
+## Security
+
+A scoring API makes credit decisions, so every endpoint except `/health` needs an API key, and each key can do only
+what its scopes allow. A loan portal gets `score`; a monitoring job gets `monitor` and `model`. Letters are a separate
+scope because each one calls the LLM.
+
+| Control | How |
+|---|---|
+| Keys | `crk_<id>_<secret>` with 32 random bytes of secret, sent in the `X-API-Key` header. Only the SHA-256 of the secret is stored (in `secrets/api_keys.json`, git-ignored, or the path in `API_KEYS_FILE`), and it is compared in constant time. The key is printed once at creation and cannot be recovered. |
+| Scopes | `score`, `letter`, `monitor`, `model`. A valid key without the scope gets 403; a missing, wrong, revoked or expired key gets 401. |
+| Lifecycle | Optional expiry date per key. `python -m creditrisk.security revoke <id>` takes effect on the next request; the server re-reads the file when it changes. |
+| Rate limits | Sliding one-minute window per key (`--rate`, default 60), answered with 429 and `Retry-After`. One noisy client cannot exhaust another's allowance. |
+| Fail closed | With no keys configured, protected endpoints return 503 instead of serving anonymously. |
+| Audit | Every decision, batch, refused key and scope denial is logged to `creditrisk.audit` as JSON with the client name, key id and a request id (also returned as `X-Request-ID`). Applicant figures are not logged. |
+
+```bash
+python -m creditrisk.security create --name loan-portal --scopes score --expires 2027-06-30 --rate 120
+python -m creditrisk.security list
+python -m creditrisk.security revoke 1a2b3c4d
+```
+
+`tests/test_security.py` covers the 401/403/429/503 paths, forged secrets for a real key id, scope isolation,
+expiry, revocation without a restart, that the key file holds no plaintext secret, per-key rate limits, and that the
+audit log carries the request id but no applicant data.
+
+Not covered here: TLS (terminate it at a reverse proxy or load balancer), key rotation reminders, and authentication
+for the Streamlit dashboard, which is a local analyst tool that loads the model directly; put it behind your
+organisation's single sign-on before exposing it.
 
 ## Project layout
 
@@ -173,6 +206,7 @@ creditrisk/
   drift.py          PSI and stress scenario
   letter.py         grounded LLM letters with template fallback
   scoring.py        Scorer: raw records -> decisions
+  security.py       API keys: scopes, expiry, revocation, rate limits, key CLI
   train.py          end-to-end pipeline -> artifacts/, reports/, MLflow
 api/main.py         FastAPI service
 dashboard/app.py    Streamlit dashboard

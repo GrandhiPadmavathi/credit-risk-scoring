@@ -12,15 +12,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi.testclient import TestClient  # noqa: E402
 from streamlit.testing.v1 import AppTest  # noqa: E402
 
-from api.main import app  # noqa: E402
+from api.main import create_app  # noqa: E402
 from creditrisk import data, drift  # noqa: E402
 from creditrisk.config import ROOT  # noqa: E402
 from creditrisk.profiles import PRESETS  # noqa: E402
 from creditrisk.profiles import to_applicant as applicant  # noqa: E402
+from creditrisk.security import SCOPES, KeyStore, new_key  # noqa: E402
 
 
 def main() -> None:
-    client = TestClient(app)
+    full_key, full = new_key("smoke-full", list(SCOPES))
+    portal_key, portal = new_key("smoke-portal", ["score"])
+    app = create_app(keys=KeyStore([full, portal]))
+    anonymous = TestClient(app)
+    print("no key:", anonymous.post("/score", json=applicant(PRESETS["Reliable payer"])).status_code,
+          "| score-only key asking for a letter:",
+          anonymous.post("/score?letter=true", json=applicant(PRESETS["Reliable payer"]),
+                         headers={"X-API-Key": portal_key}).status_code)
+
+    client = TestClient(app, headers={"X-API-Key": full_key})
     print("health:", client.get("/health").json())
     print("model:", json.dumps(client.get("/model").json()["test_metrics"]["lightgbm"], indent=None)[:200])
     for name, preset in PRESETS.items():

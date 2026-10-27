@@ -14,6 +14,9 @@ mlflow.db
 mlruns/
 mlartifacts/
 
+# API key hashes (created with `python -m creditrisk.security create`)
+secrets/
+
 # Local run logs
 *_out.txt
 *_err.txt
