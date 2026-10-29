@@ -122,7 +122,7 @@ docker run -p 8501:8501 credit-risk streamlit run dashboard/app.py --server.addr
 ### Decision letters
 
 Letters use any OpenAI-compatible endpoint: local Ollama by default (`LLM_MODEL=qwen2.5:3b`), or Groq with
-`LLM_BASE_URL=https://api.groq.com/openai/v1`, `LLM_API_KEY=...`, `LLM_MODEL=llama-3.1-8b-instant`.
+`LLM_BASE_URL=https://api.groq.com/openai/v1`, `LLM_API_KEY=...`, `LLM_MODEL=qwen/qwen3.8-27b`.
 `LLM_ENABLED=0` uses the template only.
 
 ## API
